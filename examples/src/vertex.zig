@@ -1,5 +1,5 @@
 const std = @import("std");
-const gpu = std.gpu;
+const gpu = std.spirv;
 
 const v_color = @extern(*addrspace(.output) @Vector(3, f32), .{ .name = "v_color", .decoration = .{ .location = 0 } });
 
