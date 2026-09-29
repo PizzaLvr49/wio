@@ -122,37 +122,6 @@ pub const Window = struct {
         return .{ .files = &.{}, .text = null };
     }
 
-    pub fn createFramebuffer(self: *Window, size: wio.Size) !Framebuffer {
-        _ = self;
-        _ = size;
-        return error.Unexpected;
-    }
-
-    pub fn presentFramebuffer(self: *Window, framebuffer: *Framebuffer) void {
-        _ = self;
-        _ = framebuffer;
-    }
-
-    pub fn glCreateContext(self: *Window, options: wio.GlCreateContextOptions) !GlContext {
-        _ = self;
-        _ = options;
-        return error.Unexpected;
-    }
-
-    pub fn glMakeContextCurrent(self: *Window, context: GlContext) void {
-        _ = self;
-        _ = context;
-    }
-
-    pub fn glSwapBuffers(self: *Window) void {
-        _ = self;
-    }
-
-    pub fn glSwapInterval(self: *Window, interval: i32) void {
-        _ = self;
-        _ = interval;
-    }
-
     pub fn vkCreateSurface(self: *Window, instance: usize, allocation_callbacks: ?*const anyopaque, surface: *u64) i32 {
         _ = self;
         _ = instance;
@@ -161,32 +130,6 @@ pub const Window = struct {
         return 0;
     }
 };
-
-pub const Framebuffer = struct {
-    pub fn destroy(self: *Framebuffer) void {
-        _ = self;
-    }
-
-    pub fn setPixel(self: *Framebuffer, x: usize, y: usize, rgb: u32) void {
-        _ = self;
-        _ = x;
-        _ = y;
-        _ = rgb;
-    }
-};
-
-pub const GlContext = struct {
-    pub fn destroy(self: GlContext) void {
-        _ = self;
-    }
-};
-
-pub fn glGetProcAddress(name: [*:0]const u8) ?*const anyopaque {
-    _ = name;
-    return null;
-}
-
-pub fn glReleaseCurrentContext() void {}
 
 pub fn vkGetInstanceProcAddr(instance: usize, name: [*:0]const u8) ?*const fn () void {
     _ = instance;
@@ -244,65 +187,5 @@ pub const Joystick = struct {
     pub fn poll(self: *Joystick) ?wio.JoystickState {
         _ = self;
         return null;
-    }
-};
-
-pub const AudioDeviceIterator = struct {
-    pub fn init(mode: wio.AudioDeviceType) AudioDeviceIterator {
-        _ = mode;
-        return .{};
-    }
-
-    pub fn deinit(self: *AudioDeviceIterator) void {
-        _ = self;
-    }
-
-    pub fn next(self: *AudioDeviceIterator) ?AudioDevice {
-        _ = self;
-        return null;
-    }
-};
-
-pub const AudioDevice = struct {
-    pub fn release(self: AudioDevice) void {
-        _ = self;
-    }
-
-    pub fn openOutput(self: AudioDevice, writeFn: *const fn ([]f32) void, format: wio.AudioFormat) !AudioOutput {
-        _ = self;
-        _ = writeFn;
-        _ = format;
-        return error.Unexpected;
-    }
-
-    pub fn openInput(self: AudioDevice, readFn: *const fn ([]const f32) void, format: wio.AudioFormat) !AudioInput {
-        _ = self;
-        _ = readFn;
-        _ = format;
-        return error.Unexpected;
-    }
-
-    pub fn getId(self: AudioDevice, allocator: std.mem.Allocator) ![]u8 {
-        _ = self;
-        _ = allocator;
-        return error.Unexpected;
-    }
-
-    pub fn getName(self: AudioDevice, allocator: std.mem.Allocator) ![]u8 {
-        _ = self;
-        _ = allocator;
-        return error.Unexpected;
-    }
-};
-
-pub const AudioOutput = struct {
-    pub fn close(self: *AudioOutput) void {
-        _ = self;
-    }
-};
-
-pub const AudioInput = struct {
-    pub fn close(self: *AudioInput) void {
-        _ = self;
     }
 };

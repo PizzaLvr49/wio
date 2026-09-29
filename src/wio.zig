@@ -5,27 +5,19 @@ const internal = @import("wio.internal.zig");
 
 pub const backend_name: enum {
     win32,
-    macos,
     unix,
-    wasm,
-    haiku,
-    android,
 } = switch (builtin.os.tag) {
     .windows => .win32,
-    .macos => .macos,
-    .linux => if (builtin.target.abi.isAndroid()) .android else .unix,
+    .macos => @compileError("unsupported platform"),
+    .linux => if (builtin.target.abi.isAndroid()) @compileError("unsupported platform") else .unix,
     .openbsd, .netbsd, .freebsd, .dragonfly, .illumos => .unix,
-    .haiku => .haiku,
-    else => if (builtin.target.cpu.arch.isWasm()) .wasm else @compileError("unsupported platform"),
+    .haiku => @compileError("unsupported platform"),
+    else => if (builtin.target.cpu.arch.isWasm()) @compileError("unsupported platform"),
 };
 
 pub const backend = switch (backend_name) {
     .win32 => @import("win32.zig"),
-    .macos => @import("macos.zig"),
     .unix => @import("unix.zig"),
-    .wasm => @import("wasm.zig"),
-    .haiku => @import("haiku.zig"),
-    .android => @import("android.zig"),
 };
 
 comptime {
@@ -40,10 +32,6 @@ pub const InitOptions = struct {
     eventFn: *const fn (?*anyopaque, Event) void,
     /// Free with `JoystickDevice.release()`.
     joystickConnectedFn: ?*const fn (JoystickDevice) void = null,
-    /// Free with `AudioDevice.release()`.
-    audioDefaultOutputFn: ?*const fn (AudioDevice) void = null,
-    /// Free with `AudioDevice.release()`.
-    audioDefaultInputFn: ?*const fn (AudioDevice) void = null,
 };
 
 /// Must be called only once.
@@ -138,8 +126,6 @@ pub const CreateWindowOptions = struct {
     ///
     /// Only functional on Windows and X11.
     parent: usize = 0,
-
-    gl_options: ?GlOptions = null,
 };
 
 pub const Window = struct {
@@ -237,42 +223,6 @@ pub const Window = struct {
         return self.backend.getDropData(allocator);
     }
 
-    pub fn createFramebuffer(self: *Window, size: Size) !Framebuffer {
-        assertFeature(.framebuffer);
-        return .{ .backend = try self.backend.createFramebuffer(size) };
-    }
-
-    pub fn presentFramebuffer(self: *Window, framebuffer: *Framebuffer) void {
-        assertFeature(.framebuffer);
-        self.backend.presentFramebuffer(&framebuffer.backend);
-    }
-
-    /// Must be destroyed before the window.
-    pub fn glCreateContext(self: *Window, options: GlCreateContextOptions) !GlContext {
-        assertFeature(.opengl);
-        return .{ .backend = try self.backend.glCreateContext(options) };
-    }
-
-    /// May be called on any thread.
-    pub fn glMakeContextCurrent(self: *Window, context: GlContext) void {
-        assertFeature(.opengl);
-        self.backend.glMakeContextCurrent(context.backend);
-    }
-
-    /// Must be called on the thread where the context is current.
-    ///
-    /// On Wayland, this function may block if the window is hidden.
-    pub fn glSwapBuffers(self: *Window) void {
-        assertFeature(.opengl);
-        self.backend.glSwapBuffers();
-    }
-
-    /// Must be called on the thread where the context is current.
-    pub fn glSwapInterval(self: *Window, interval: i32) void {
-        assertFeature(.opengl);
-        self.backend.glSwapInterval(interval);
-    }
-
     /// **WebAssembly**, **Haiku** - Not available.
     pub fn vkCreateSurface(self: *Window, instance: usize, allocation_callbacks: ?*const anyopaque, surface: *u64) !void {
         assertFeature(.vulkan);
@@ -312,66 +262,6 @@ pub const DropData = struct {
         if (self.text) |t| allocator.free(t);
     }
 };
-
-pub const Framebuffer = struct {
-    backend: backend.Framebuffer,
-
-    pub fn destroy(self: *Framebuffer) void {
-        self.backend.destroy();
-    }
-
-    /// `rgb` is encoded as 0xRRGGBB.
-    ///
-    /// `x` and `y` must be within the framebuffer.
-    pub fn setPixel(self: *Framebuffer, x: usize, y: usize, rgb: u32) void {
-        self.backend.setPixel(x, y, rgb);
-    }
-};
-
-pub const GlApi = enum { gl, gles1, gles2 };
-
-pub const GlOptions = struct {
-    api: GlApi = .gl,
-    major_version: u8 = 1,
-    minor_version: u8 = 0,
-    profile: enum { compatibility, core } = .compatibility,
-    forward_compatible: bool = false,
-    debug: bool = false,
-
-    doublebuffer: bool = true,
-    red_bits: u8 = 8,
-    green_bits: u8 = 8,
-    blue_bits: u8 = 8,
-    alpha_bits: u8 = 8,
-    depth_bits: u8 = 24,
-    stencil_bits: u8 = 8,
-    samples: u8 = 0,
-};
-
-pub const GlCreateContextOptions = struct {
-    options: GlOptions,
-    share: ?GlContext = null,
-};
-
-pub const GlContext = struct {
-    backend: backend.GlContext,
-
-    pub fn destroy(self: GlContext) void {
-        self.backend.destroy();
-    }
-};
-
-/// Must be called on the thread where the context is current.
-pub fn glGetProcAddress(name: [*:0]const u8) ?*const fn () void {
-    assertFeature(.opengl);
-    return @ptrCast(@alignCast(backend.glGetProcAddress(name)));
-}
-
-/// May be called on any thread.
-pub fn glReleaseCurrentContext() void {
-    assertFeature(.opengl);
-    backend.glReleaseCurrentContext();
-}
 
 /// **WebAssembly**, **Haiku** - Not available.
 pub fn vkGetInstanceProcAddr(instance: usize, name: [*:0]const u8) ?*const fn () void {
@@ -451,89 +341,13 @@ pub const Hat = packed struct {
     left: bool = false,
 };
 
-pub const AudioDeviceType = enum { output, input };
-
-pub const AudioDeviceIterator = struct {
-    backend: backend.AudioDeviceIterator,
-
-    /// Free with `deinit()` before the next iteration of the main loop.
-    pub fn init(mode: AudioDeviceType) AudioDeviceIterator {
-        assertFeature(.audio);
-        return .{ .backend = backend.AudioDeviceIterator.init(mode) };
-    }
-
-    pub fn deinit(self: *AudioDeviceIterator) void {
-        self.backend.deinit();
-    }
-
-    /// Free with `AudioDevice.release()`.
-    pub fn next(self: *AudioDeviceIterator) ?AudioDevice {
-        return .{ .backend = self.backend.next() orelse return null };
-    }
-};
-
-pub const AudioDevice = struct {
-    backend: backend.AudioDevice,
-
-    pub fn release(self: AudioDevice) void {
-        return self.backend.release();
-    }
-
-    /// `writeFn` is called on a separate thread.
-    ///
-    /// Free with `AudioOutput.close()`.
-    pub fn openOutput(self: AudioDevice, writeFn: *const fn ([]f32) void, format: AudioFormat) ?AudioOutput {
-        return .{ .backend = self.backend.openOutput(writeFn, format) catch return null };
-    }
-
-    /// `readFn` is called on a separate thread.
-    ///
-    /// Free with `AudioInput.close()`.
-    pub fn openInput(self: AudioDevice, readFn: *const fn ([]const f32) void, format: AudioFormat) ?AudioInput {
-        return .{ .backend = self.backend.openInput(readFn, format) catch return null };
-    }
-
-    /// May not be unique.
-    pub fn getId(self: AudioDevice, allocator: std.mem.Allocator) ?[]u8 {
-        return self.backend.getId(allocator) catch null;
-    }
-
-    /// Returns "" on error.
-    pub fn getName(self: AudioDevice, allocator: std.mem.Allocator) []u8 {
-        return self.backend.getName(allocator) catch "";
-    }
-};
-
-pub const AudioFormat = struct {
-    sample_rate: u32,
-    channels: u8,
-};
-
-pub const AudioOutput = struct {
-    backend: @typeInfo(@typeInfo(@TypeOf(backend.AudioDevice.openOutput)).@"fn".return_type.?).error_union.payload,
-
-    pub fn close(self: *AudioOutput) void {
-        self.backend.close();
-    }
-};
-
-pub const AudioInput = struct {
-    backend: @typeInfo(@typeInfo(@TypeOf(backend.AudioDevice.openInput)).@"fn".return_type.?).error_union.payload,
-
-    pub fn close(self: *AudioInput) void {
-        self.backend.close();
-    }
-};
-
 pub const EventQueue = struct {
     events: std.ArrayList(Event),
     head: usize,
-    mutex: if (internal.event_thread) std.Io.Mutex else void,
 
     pub const empty: EventQueue = .{
         .events = .empty,
         .head = 0,
-        .mutex = if (internal.event_thread) .init else {},
     };
 
     pub fn deinit(self: *EventQueue) void {
@@ -541,9 +355,6 @@ pub const EventQueue = struct {
     }
 
     pub fn push(self: *EventQueue, event: Event) void {
-        if (internal.event_thread) self.mutex.lockUncancelable(internal.io);
-        defer if (internal.event_thread) self.mutex.unlock(internal.io);
-
         if (self.head != 0) {
             self.events.replaceRangeAssumeCapacity(0, self.head, &.{});
             self.head = 0;
@@ -565,9 +376,6 @@ pub const EventQueue = struct {
     }
 
     pub fn pop(self: *EventQueue) ?Event {
-        if (internal.event_thread) self.mutex.lockUncancelable(internal.io);
-        defer if (internal.event_thread) self.mutex.unlock(internal.io);
-
         if (self.head == self.events.items.len) return null;
         defer self.head += 1;
         return self.events.items[self.head];
@@ -583,10 +391,6 @@ pub const Event = union(enum) {
     close: void,
     focused: void,
     unfocused: void,
-    /// **Android** - Indicates that rendering is allowed.
-    visible: void,
-    /// **Android** - Indicates that rendering is not allowed.
-    hidden: void,
     draw: void,
 
     /// On change, sent before `position` or `size_logical`.

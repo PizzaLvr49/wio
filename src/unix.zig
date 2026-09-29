@@ -10,11 +10,6 @@ const joystick = switch (builtin.os.tag) {
     .linux => @import("unix/joystick/linux.zig"),
     else => @import("unix/joystick/null.zig"),
 };
-const audio = switch (builtin.os.tag) {
-    .linux => @import("unix/audio/pulseaudio.zig"),
-    .openbsd => @import("unix/audio/sndio.zig"),
-    else => @import("unix/audio/null.zig"),
-};
 const log = std.log.scoped(.wio);
 
 pub var active: enum {
@@ -55,8 +50,6 @@ pub fn init(options: wio.InitOptions) !void {
 
     if (build_options.joystick) try joystick.init(options);
     errdefer if (build_options.joystick) joystick.deinit();
-    if (build_options.audio) try audio.init(options);
-    errdefer if (build_options.audio) audio.deinit();
 
     var try_x11 = true;
     var try_wayland = true;
@@ -102,7 +95,6 @@ pub fn deinit() void {
         .x11 => x11.deinit(),
         .wayland => wayland.deinit(),
     }
-    if (build_options.audio) audio.deinit();
     if (build_options.joystick) joystick.deinit();
     if (build_options.vulkan) libvulkan.close();
     pollfds.deinit(internal.allocator);
@@ -120,7 +112,6 @@ pub fn update() void {
         .wayland => wayland.update(),
     }
     if (build_options.joystick) joystick.update();
-    if (build_options.audio) audio.update();
 }
 
 pub fn wait(options: wio.WaitOptions) void {
@@ -351,48 +342,6 @@ pub const Window = union {
         }
     }
 
-    pub fn createFramebuffer(self: *Window, size: wio.Size) !Framebuffer {
-        switch (active) {
-            .x11 => return .{ .x11 = try self.x11.createFramebuffer(size) },
-            .wayland => return .{ .wayland = try self.wayland.createFramebuffer(size) },
-        }
-    }
-
-    pub fn presentFramebuffer(self: *Window, framebuffer: *Framebuffer) void {
-        switch (active) {
-            .x11 => self.x11.presentFramebuffer(&framebuffer.x11),
-            .wayland => self.wayland.presentFramebuffer(&framebuffer.wayland),
-        }
-    }
-
-    pub fn glCreateContext(self: *Window, options: wio.GlCreateContextOptions) !GlContext {
-        return switch (active) {
-            .x11 => .{ .x11 = try self.x11.glCreateContext(options) },
-            .wayland => .{ .wayland = try self.wayland.glCreateContext(options) },
-        };
-    }
-
-    pub fn glMakeContextCurrent(self: *Window, context: GlContext) void {
-        switch (active) {
-            .x11 => self.x11.glMakeContextCurrent(context.x11),
-            .wayland => self.wayland.glMakeContextCurrent(context.wayland),
-        }
-    }
-
-    pub fn glSwapBuffers(self: *Window) void {
-        switch (active) {
-            .x11 => self.x11.glSwapBuffers(),
-            .wayland => self.wayland.glSwapBuffers(),
-        }
-    }
-
-    pub fn glSwapInterval(self: *Window, interval: i32) void {
-        switch (active) {
-            .x11 => self.x11.glSwapInterval(interval),
-            .wayland => self.wayland.glSwapInterval(interval),
-        }
-    }
-
     pub fn vkCreateSurface(self: Window, instance: usize, allocation_callbacks: ?*const anyopaque, surface: *u64) i32 {
         switch (active) {
             .x11 => return self.x11.vkCreateSurface(instance, allocation_callbacks, surface),
@@ -400,51 +349,6 @@ pub const Window = union {
         }
     }
 };
-
-pub const Framebuffer = union {
-    x11: x11.Framebuffer,
-    wayland: wayland.Framebuffer,
-
-    pub fn destroy(self: *Framebuffer) void {
-        switch (active) {
-            .x11 => self.x11.destroy(),
-            .wayland => self.wayland.destroy(),
-        }
-    }
-
-    pub fn setPixel(self: *Framebuffer, x: usize, y: usize, rgb: u32) void {
-        switch (active) {
-            .x11 => self.x11.setPixel(x, y, rgb),
-            .wayland => self.wayland.setPixel(x, y, rgb),
-        }
-    }
-};
-
-pub const GlContext = union {
-    x11: x11.GlContext,
-    wayland: wayland.GlContext,
-
-    pub fn destroy(self: GlContext) void {
-        switch (active) {
-            .x11 => self.x11.destroy(),
-            .wayland => self.wayland.destroy(),
-        }
-    }
-};
-
-pub fn glGetProcAddress(name: [*:0]const u8) ?*const anyopaque {
-    switch (active) {
-        .x11 => return x11.glGetProcAddress(name),
-        .wayland => return wayland.glGetProcAddress(name),
-    }
-}
-
-pub fn glReleaseCurrentContext() void {
-    switch (active) {
-        .x11 => return x11.glReleaseCurrentContext(),
-        .wayland => return wayland.glReleaseCurrentContext(),
-    }
-}
 
 pub var vkGetInstanceProcAddr: *const fn (usize, [*:0]const u8) callconv(.c) ?*const fn () void = undefined;
 
@@ -458,8 +362,3 @@ pub fn getRequiredVulkanInstanceExtensions() []const [*:0]const u8 {
 pub const JoystickDeviceIterator = joystick.JoystickDeviceIterator;
 pub const JoystickDevice = joystick.JoystickDevice;
 pub const Joystick = joystick.Joystick;
-
-pub const AudioDeviceIterator = audio.AudioDeviceIterator;
-pub const AudioDevice = audio.AudioDevice;
-pub const AudioOutput = audio.AudioOutput;
-pub const AudioInput = audio.AudioInput;

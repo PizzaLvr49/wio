@@ -53,34 +53,13 @@ var imports: extern struct {
     libdecor_frame_set_fullscreen: *const fn (frame: ?*h.struct_libdecor_frame, output: ?*h.struct_wl_output) callconv(.c) void,
     libdecor_frame_unset_fullscreen: *const fn (frame: ?*h.struct_libdecor_frame) callconv(.c) void,
     libdecor_frame_set_minimized: *const fn (frame: ?*h.struct_libdecor_frame) callconv(.c) void,
-    wl_egl_window_create: *const fn (surface: ?*h.struct_wl_surface, width: c_int, height: c_int) callconv(.c) ?*h.struct_wl_egl_window,
-    wl_egl_window_destroy: *const fn (egl_window: ?*h.struct_wl_egl_window) callconv(.c) void,
-    wl_egl_window_resize: *const fn (egl_window: ?*h.struct_wl_egl_window, width: c_int, height: c_int, dx: c_int, dy: c_int) callconv(.c) void,
-    eglGetDisplay: *const fn (display_id: h.EGLNativeDisplayType) callconv(.c) h.EGLDisplay,
-    eglGetError: *const fn () callconv(.c) h.EGLint,
-    eglInitialize: *const fn (dpy: h.EGLDisplay, major: [*c]h.EGLint, minor: [*c]h.EGLint) callconv(.c) h.EGLBoolean,
-    eglTerminate: *const fn (dpy: h.EGLDisplay) callconv(.c) h.EGLBoolean,
-    eglBindAPI: *const fn (api: h.EGLenum) callconv(.c) h.EGLBoolean,
-    eglChooseConfig: *const fn (dpy: h.EGLDisplay, attrib_list: [*c]const h.EGLint, configs: [*c]h.EGLConfig, config_size: h.EGLint, num_config: [*c]h.EGLint) callconv(.c) h.EGLBoolean,
-    eglCreateWindowSurface: *const fn (dpy: h.EGLDisplay, config: h.EGLConfig, win: h.EGLNativeWindowType, attrib_list: [*c]const h.EGLint) callconv(.c) h.EGLSurface,
-    eglDestroySurface: *const fn (dpy: h.EGLDisplay, surface: h.EGLSurface) callconv(.c) h.EGLBoolean,
-    eglCreateContext: *const fn (dpy: h.EGLDisplay, config: h.EGLConfig, share_context: h.EGLContext, attrib_list: [*c]const h.EGLint) callconv(.c) h.EGLContext,
-    eglDestroyContext: *const fn (dpy: h.EGLDisplay, ctx: h.EGLContext) callconv(.c) h.EGLBoolean,
-    eglMakeCurrent: *const fn (dpy: h.EGLDisplay, draw: h.EGLSurface, read: h.EGLSurface, ctx: h.EGLContext) callconv(.c) h.EGLBoolean,
-    eglSwapBuffers: *const fn (dpy: h.EGLDisplay, surface: h.EGLSurface) callconv(.c) h.EGLBoolean,
-    eglSwapInterval: *const fn (dpy: h.EGLDisplay, interval: h.EGLint) callconv(.c) h.EGLBoolean,
-    eglGetProcAddress: *const fn (procname: [*c]const u8) callconv(.c) h.__eglMustCastToProperFunctionPointerType,
 } = undefined;
 const c = if (build_options.system_integration) h else &imports;
-
-const egl = internal.egl(c, h);
 
 pub var globals: struct {
     libwayland_client: DynLib = undefined,
     libxkbcommon: DynLib = undefined,
     libdecor: DynLib = undefined,
-    libwayland_egl: if (build_options.opengl) DynLib else void = undefined,
-    libEGL: if (build_options.opengl) DynLib else void = undefined,
 
     display: *h.wl_display = undefined,
     registry: *h.wl_registry = undefined,
@@ -165,15 +144,6 @@ pub fn init() !bool {
     errdefer globals.libxkbcommon.close();
     errdefer globals.libdecor.close();
 
-    if (build_options.opengl) {
-        DynLib.load(&imports, &.{
-            .{ .handle = &globals.libwayland_egl, .name = "libwayland-egl.so.1", .prefix = "wl_egl" },
-            .{ .handle = &globals.libEGL, .name = "libEGL.so.1", .prefix = "egl" },
-        }) catch return false;
-    }
-    errdefer if (build_options.opengl) globals.libwayland_egl.close();
-    errdefer if (build_options.opengl) globals.libEGL.close();
-
     if (!build_options.system_integration) {
         exports.wio_wl_proxy_get_version = c.wl_proxy_get_version;
         exports.wio_wl_proxy_marshal_flags = c.wl_proxy_marshal_flags;
@@ -220,20 +190,10 @@ pub fn init() !bool {
         }
     }
 
-    if (build_options.opengl) {
-        try egl.init(globals.display);
-    }
-
     return true;
 }
 
 pub fn deinit() void {
-    if (build_options.opengl) {
-        _ = c.eglTerminate(egl.display);
-        globals.libEGL.close();
-        globals.libwayland_egl.close();
-    }
-
     internal.allocator.free(globals.clipboard_text);
     globals.touch_info.deinit(internal.allocator);
     globals.commit_string.deinit(internal.allocator);
@@ -257,7 +217,6 @@ pub fn deinit() void {
 }
 
 fn destroyProxies() void {
-    if (build_options.framebuffer) if (globals.shm) |_| h.wl_shm_destroy(globals.shm);
     if (globals.data_source) |_| h.wl_data_source_destroy(globals.data_source);
     if (globals.data_offer) |_| h.wl_data_offer_destroy(globals.data_offer);
     if (globals.data_device) |_| h.wl_data_device_destroy(globals.data_device);
@@ -314,11 +273,6 @@ pub const Window = struct {
         files: std.ArrayList([]const u8) = .empty,
         text: ?[]const u8 = null,
     } else struct {} = .{},
-    egl: if (build_options.opengl) struct {
-        config: h.EGLConfig = null,
-        window: ?*h.wl_egl_window = null,
-        surface: h.EGLSurface = null,
-    } else struct {} = .{},
 
     pub fn create(options: wio.CreateWindowOptions) !*Window {
         const self = try internal.allocator.create(Window);
@@ -371,14 +325,6 @@ pub const Window = struct {
             c.libdecor_frame_set_app_id(self.frame, id);
         }
 
-        if (build_options.opengl) {
-            if (options.gl_options) |gl| {
-                self.egl.config = try egl.chooseConfig(gl);
-                self.egl.window = c.wl_egl_window_create(self.surface, options.size.width, options.size.height);
-                self.egl.surface = c.eglCreateWindowSurface(egl.display, self.egl.config, self.egl.window, null) orelse return egl.logError("eglCreateWindowSurface");
-            }
-        }
-
         try globals.windows.put(internal.allocator, self, {});
         return self;
     }
@@ -401,11 +347,6 @@ pub const Window = struct {
                 }
             }
             break;
-        }
-
-        if (build_options.opengl) {
-            if (self.egl.surface) |_| _ = c.eglDestroySurface(egl.display, self.egl.surface);
-            if (self.egl.window) |_| c.wl_egl_window_destroy(self.egl.window);
         }
 
         if (build_options.drop) {
@@ -592,93 +533,6 @@ pub const Window = struct {
         return wio.DropData.dupe(allocator, self.drop.files.items, self.drop.text) catch .{ .files = &.{}, .text = null };
     }
 
-    pub fn createFramebuffer(_: *Window, size: wio.Size) !Framebuffer {
-        if (globals.shm == null) return error.Unexpected;
-
-        const fd = blk: {
-            var attempt: u8 = 0;
-            while (attempt < 10) : (attempt += 1) {
-                const now = std.Io.Clock.awake.now(internal.io).nanoseconds;
-                const name = try std.fmt.allocPrintSentinel(internal.allocator, "/wio-{x}", .{now}, 0);
-                defer internal.allocator.free(name);
-
-                const fd = std.c.shm_open(name, @bitCast(std.c.O{ .ACCMODE = .RDWR, .CREAT = true, .EXCL = true }), 0o600);
-                if (fd >= 0) {
-                    _ = std.c.shm_unlink(name);
-                    break :blk fd;
-                }
-            }
-            return error.Unexpected;
-        };
-        errdefer _ = std.c.close(fd);
-
-        const byte_size = @sizeOf(u32) * @as(usize, size.width) * size.height;
-
-        if (std.c.errno(std.c.ftruncate(fd, std.math.cast(std.c.off_t, byte_size) orelse return error.Unexpected)) != .SUCCESS) return error.Unexpected;
-
-        const mapped = try std.posix.mmap(
-            null,
-            byte_size,
-            .{ .READ = true, .WRITE = true },
-            .{ .TYPE = .SHARED },
-            fd,
-            0,
-        );
-        errdefer std.posix.munmap(mapped);
-
-        const pool = h.wl_shm_create_pool(
-            globals.shm,
-            fd,
-            std.math.cast(i32, byte_size) orelse return error.Unexpected,
-        ) orelse return error.Unexpected;
-        defer h.wl_shm_pool_destroy(pool);
-
-        const buffer = h.wl_shm_pool_create_buffer(
-            pool,
-            0,
-            size.width,
-            size.height,
-            @as(i32, size.width) * @sizeOf(u32),
-            h.WL_SHM_FORMAT_XRGB8888,
-        ) orelse return error.Unexpected;
-
-        return .{
-            .fd = fd,
-            .mapped = mapped,
-            .buffer = buffer,
-            .width = size.width,
-        };
-    }
-
-    pub fn presentFramebuffer(self: *Window, framebuffer: *Framebuffer) void {
-        h.wl_surface_attach(self.surface, framebuffer.buffer, 0, 0);
-        h.wl_surface_damage(self.surface, 0, 0, std.math.maxInt(i32), std.math.maxInt(i32));
-        h.wl_surface_commit(self.surface);
-        _ = c.wl_display_roundtrip(globals.display);
-    }
-
-    pub fn glCreateContext(self: *Window, options: wio.GlCreateContextOptions) !GlContext {
-        return .{
-            .context = try egl.createContext(
-                self.egl.config,
-                options.options,
-                if (options.share) |share| share.backend.wayland.context else null,
-            ),
-        };
-    }
-
-    pub fn glMakeContextCurrent(self: *Window, context: GlContext) void {
-        _ = c.eglMakeCurrent(egl.display, self.egl.surface, self.egl.surface, context.context);
-    }
-
-    pub fn glSwapBuffers(self: *Window) void {
-        _ = c.eglSwapBuffers(egl.display, self.egl.surface);
-    }
-
-    pub fn glSwapInterval(_: *Window, interval: i32) void {
-        _ = c.eglSwapInterval(egl.display, interval);
-    }
-
     pub fn vkCreateSurface(self: Window, instance: usize, allocation_callbacks: ?*const anyopaque, surface: *u64) i32 {
         const VkWaylandSurfaceCreateInfoKHR = extern struct {
             sType: i32 = 1000006000,
@@ -708,8 +562,6 @@ pub const Window = struct {
         if (self.viewport) |_| {
             h.wp_viewport_set_destination(self.viewport, size.width, size.height);
         }
-
-        if (build_options.opengl) if (self.egl.window != null) c.wl_egl_window_resize(self.egl.window, framebuffer.width, framebuffer.height, 0, 0);
 
         const state = c.libdecor_state_new(size.width, size.height);
         defer c.libdecor_state_free(state);
@@ -773,39 +625,6 @@ pub const Window = struct {
     }
 };
 
-pub const Framebuffer = struct {
-    fd: std.c.fd_t,
-    mapped: []align(std.heap.page_size_min) u8,
-    buffer: *h.wl_buffer,
-    width: u16,
-
-    pub fn destroy(self: *Framebuffer) void {
-        h.wl_buffer_destroy(self.buffer);
-        std.posix.munmap(self.mapped);
-        _ = std.c.close(self.fd);
-    }
-
-    pub fn setPixel(self: *Framebuffer, x: usize, y: usize, rgb: u32) void {
-        std.mem.writeInt(u32, std.mem.asBytes(&std.mem.bytesAsSlice(u32, self.mapped)[y * self.width + x]), rgb, .little);
-    }
-};
-
-pub const GlContext = struct {
-    context: h.EGLContext,
-
-    pub fn destroy(self: GlContext) void {
-        _ = c.eglDestroyContext(egl.display, self.context);
-    }
-};
-
-pub fn glGetProcAddress(name: [*:0]const u8) ?*const anyopaque {
-    return c.eglGetProcAddress(name);
-}
-
-pub fn glReleaseCurrentContext() void {
-    _ = c.eglMakeCurrent(egl.display, h.EGL_NO_SURFACE, h.EGL_NO_SURFACE, h.EGL_NO_CONTEXT);
-}
-
 pub fn getRequiredVulkanInstanceExtensions() []const [*:0]const u8 {
     return &.{ "VK_KHR_surface", "VK_KHR_wayland_surface" };
 }
@@ -845,8 +664,6 @@ fn registryGlobal(_: ?*anyopaque, registry: ?*h.wl_registry, name: u32, interfac
     const interface = std.mem.sliceTo(interface_ptr, 0);
     if (std.mem.eql(u8, interface, "wl_compositor")) {
         globals.compositor = @ptrCast(h.wl_registry_bind(registry, name, &h.wl_compositor_interface, @min(version, 3)));
-    } else if (build_options.framebuffer and std.mem.eql(u8, interface, "wl_shm")) {
-        globals.shm = @ptrCast(h.wl_registry_bind(registry, name, &h.wl_shm_interface, @min(version, 1)));
     } else if (std.mem.eql(u8, interface, "wl_seat")) {
         globals.seat = @ptrCast(h.wl_registry_bind(registry, name, &h.wl_seat_interface, @min(version, 4)));
         _ = h.wl_seat_add_listener(globals.seat, &seat_listener, null);

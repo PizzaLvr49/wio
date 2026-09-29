@@ -69,21 +69,8 @@ var imports: extern struct {
     XRRFreeScreenResources: *const fn (resources: [*c]h.XRRScreenResources) callconv(.c) void,
     XRRGetCrtcInfo: *const fn (dpy: ?*h.Display, resources: [*c]h.XRRScreenResources, crtc: h.RRCrtc) callconv(.c) [*c]h.XRRCrtcInfo,
     XRRFreeCrtcInfo: *const fn (crtcInfo: [*c]h.XRRCrtcInfo) callconv(.c) void,
-    glXQueryExtensionsString: *const fn (dpy: ?*h.Display, screen: c_int) callconv(.c) [*c]const u8,
-    glXGetProcAddress: *const fn (procname: [*c]const h.GLubyte) callconv(.c) ?*const fn () callconv(.c) void,
-    glXChooseFBConfig: *const fn (dpy: ?*h.Display, screen: c_int, attribList: [*c]const c_int, nitems: [*c]c_int) callconv(.c) [*c]h.GLXFBConfig,
-    glXGetVisualFromFBConfig: *const fn (dpy: ?*h.Display, config: h.GLXFBConfig) callconv(.c) [*c]h.XVisualInfo,
-    glXCreateNewContext: *const fn (dpy: ?*h.Display, config: h.GLXFBConfig, renderType: c_int, shareList: h.GLXContext, direct: c_int) callconv(.c) h.GLXContext,
-    glXDestroyContext: *const fn (dpy: ?*h.Display, ctx: h.GLXContext) callconv(.c) void,
-    glXMakeCurrent: *const fn (dpy: ?*h.Display, drawable: h.GLXDrawable, ctx: h.GLXContext) callconv(.c) c_int,
-    glXSwapBuffers: *const fn (dpy: ?*h.Display, drawable: h.GLXDrawable) callconv(.c) void,
 } = undefined;
 const c = if (build_options.system_integration) h else &imports;
-
-var glx: struct {
-    swapIntervalEXT: h.PFNGLXSWAPINTERVALEXTPROC = null,
-    createContextAttribsARB: h.PFNGLXCREATECONTEXTATTRIBSARBPROC = null,
-} = .{};
 
 var atoms: blk: {
     const names = [_][]const u8{
@@ -123,7 +110,6 @@ pub var globals: struct {
     libX11: DynLib = undefined,
     libXrandr: DynLib = undefined,
     libXcursor: DynLib = undefined,
-    libGL: if (build_options.opengl) DynLib else void = undefined,
     libXext: if (build_options.vulkan) DynLib else void = undefined,
     windows: std.AutoHashMapUnmanaged(h.Window, *Window) = undefined,
     display: *h.Display = undefined,
@@ -146,11 +132,6 @@ pub fn init() !bool {
     errdefer globals.libX11.close();
     errdefer globals.libXrandr.close();
     errdefer globals.libXcursor.close();
-
-    if (build_options.opengl) {
-        DynLib.load(&imports, &.{.{ .handle = &globals.libGL, .name = "libGL.so.1", .prefix = "glX" }}) catch return false;
-    }
-    errdefer if (build_options.opengl) globals.libGL.close();
 
     if (build_options.vulkan) {
         // https://gitlab.freedesktop.org/xorg/lib/libxext/-/work_items/3
@@ -229,19 +210,6 @@ pub fn init() !bool {
         } else |_| {}
     }
 
-    if (build_options.opengl) {
-        if (c.glXQueryExtensionsString(globals.display, h.DefaultScreen(globals.display))) |extensions| {
-            var iter = std.mem.tokenizeScalar(u8, std.mem.sliceTo(extensions, 0), ' ');
-            while (iter.next()) |name| {
-                if (std.mem.eql(u8, name, "GLX_ARB_create_context_profile")) {
-                    glx.createContextAttribsARB = @ptrCast(c.glXGetProcAddress("glXCreateContextAttribsARB"));
-                } else if (std.mem.eql(u8, name, "GLX_EXT_swap_control")) {
-                    glx.swapIntervalEXT = @ptrCast(c.glXGetProcAddress("glXSwapIntervalEXT"));
-                }
-            }
-        }
-    }
-
     return true;
 }
 
@@ -250,7 +218,6 @@ pub fn deinit() void {
     _ = c.XCloseIM(globals.im);
     _ = c.XCloseDisplay(globals.display);
     if (build_options.vulkan) globals.libXext.close();
-    if (build_options.opengl) globals.libGL.close();
     globals.libXcursor.close();
     globals.libXrandr.close();
     globals.libX11.close();
@@ -291,52 +258,14 @@ pub const Window = struct {
         files: std.ArrayList([]const u8) = .empty,
         text: ?[]const u8 = null,
     } else struct {} = .{},
-    opengl: if (build_options.opengl) struct {
-        config: h.GLXFBConfig,
-        colormap: h.Colormap,
-    } else struct {},
 
     pub fn create(options: wio.CreateWindowOptions) !*Window {
         var attributes: h.XSetWindowAttributes = undefined;
         attributes.event_mask = h.PropertyChangeMask | h.FocusChangeMask | h.ExposureMask | h.StructureNotifyMask | h.KeyPressMask | h.KeyReleaseMask | h.ButtonPressMask | h.ButtonReleaseMask | h.PointerMotionMask | h.LeaveWindowMask;
         attributes.colormap = h.CopyFromParent;
 
-        var depth: c_int = h.CopyFromParent;
-        var visual: ?*h.Visual = null;
-        var config: h.GLXFBConfig = null;
-        if (build_options.opengl) {
-            if (options.gl_options) |gl| {
-                var count: c_int = undefined;
-                const configs = c.glXChooseFBConfig(globals.display, h.DefaultScreen(globals.display), &[_]c_int{
-                    h.GLX_DOUBLEBUFFER,   if (gl.doublebuffer) h.True else h.False,
-                    h.GLX_RED_SIZE,       gl.red_bits,
-                    h.GLX_GREEN_SIZE,     gl.green_bits,
-                    h.GLX_BLUE_SIZE,      gl.blue_bits,
-                    h.GLX_ALPHA_SIZE,     gl.alpha_bits,
-                    h.GLX_DEPTH_SIZE,     gl.depth_bits,
-                    h.GLX_STENCIL_SIZE,   gl.stencil_bits,
-                    h.GLX_SAMPLE_BUFFERS, if (gl.samples != 0) 1 else 0,
-                    h.GLX_SAMPLES,        gl.samples,
-                    h.None,
-                }, &count) orelse return internal.logUnexpected("glXChooseFBConfig");
-                defer _ = c.XFree(@ptrCast(configs));
-
-                config = configs[0];
-
-                const info: *h.XVisualInfo = c.glXGetVisualFromFBConfig(globals.display, config) orelse return internal.logUnexpected("glXGetVisualFromFBConfig");
-                defer _ = c.XFree(info);
-                visual = info.visual;
-                depth = info.depth;
-
-                attributes.colormap = c.XCreateColormap(globals.display, h.DefaultRootWindow(globals.display), visual, h.AllocNone);
-                errdefer _ = c.XFreeColormap(globals.display, attributes.colormap);
-            }
-        }
-        errdefer if (build_options.opengl) {
-            if (options.gl_options != null) {
-                _ = c.XFreeColormap(globals.display, attributes.colormap);
-            }
-        };
+        const depth: c_int = h.CopyFromParent;
+        const visual: ?*h.Visual = null;
 
         const position: wio.Position = options.position orelse .{ .x = 0, .y = 0 };
         const size = if (options.scale) |base| options.size.multiply(globals.scale / base) else options.size;
@@ -400,7 +329,6 @@ pub const Window = struct {
             .ic = ic,
             .position = position,
             .size = options.size,
-            .opengl = if (build_options.opengl) .{ .config = config, .colormap = attributes.colormap } else .{},
         };
 
         self.setTitle(options.title);
@@ -427,10 +355,6 @@ pub const Window = struct {
         self.disableDrawAvailableEvents();
 
         _ = globals.windows.remove(self.window);
-
-        if (build_options.opengl) {
-            if (self.opengl.colormap != h.CopyFromParent) _ = c.XFreeColormap(globals.display, self.opengl.colormap);
-        }
 
         if (build_options.drop) {
             for (self.drop.files.items) |file| internal.allocator.free(file);
@@ -615,79 +539,6 @@ pub const Window = struct {
         return wio.DropData.dupe(allocator, self.drop.files.items, self.drop.text) catch .{ .files = &.{}, .text = null };
     }
 
-    pub fn createFramebuffer(self: *Window, size: wio.Size) !Framebuffer {
-        const pixels = try internal.allocator.alloc(u32, @as(usize, size.width) * size.height);
-        errdefer internal.allocator.free(pixels);
-
-        const image = c.XCreateImage(
-            globals.display,
-            h.DefaultVisual(globals.display, h.DefaultScreen(globals.display)),
-            24,
-            h.ZPixmap,
-            0,
-            @ptrCast(pixels.ptr),
-            size.width,
-            size.height,
-            32,
-            0,
-        ) orelse return internal.logUnexpected("XCreateImage");
-
-        const gc = c.XCreateGC(globals.display, self.window, 0, null);
-
-        return .{
-            .image = image,
-            .gc = gc,
-            .pixels = pixels,
-            .size = size,
-        };
-    }
-
-    pub fn presentFramebuffer(self: *Window, framebuffer: *Framebuffer) void {
-        _ = c.XPutImage(globals.display, self.window, framebuffer.gc, framebuffer.image, 0, 0, 0, 0, framebuffer.size.width, framebuffer.size.height);
-        _ = c.XFlush(globals.display);
-    }
-
-    pub fn glCreateContext(self: *Window, options: wio.GlCreateContextOptions) !GlContext {
-        return .{
-            .context = if (glx.createContextAttribsARB) |createContextAttribsARB|
-                createContextAttribsARB(
-                    globals.display,
-                    self.opengl.config,
-                    if (options.share) |share| share.backend.x11.context else null,
-                    h.True,
-                    &[_]c_int{
-                        h.GLX_CONTEXT_MAJOR_VERSION_ARB, options.options.major_version,
-                        h.GLX_CONTEXT_MINOR_VERSION_ARB, options.options.minor_version,
-                        h.GLX_CONTEXT_FLAGS_ARB,         (if (options.options.forward_compatible) h.GLX_CONTEXT_FORWARD_COMPATIBLE_BIT_ARB else 0) | (if (options.options.debug) h.GLX_CONTEXT_DEBUG_BIT_ARB else 0),
-                        h.GLX_CONTEXT_PROFILE_MASK_ARB,  if (options.options.profile == .core) h.GLX_CONTEXT_CORE_PROFILE_BIT_ARB else h.GLX_CONTEXT_COMPATIBILITY_PROFILE_BIT_ARB,
-                        h.None,
-                    },
-                ) orelse return internal.logUnexpected("glXCreateContextAttribsARB")
-            else
-                c.glXCreateNewContext(
-                    globals.display,
-                    self.opengl.config,
-                    h.GLX_RGBA_TYPE,
-                    if (options.share) |share| share.backend.x11.context else null,
-                    h.True,
-                ) orelse return internal.logUnexpected("glXCreateNewContext"),
-        };
-    }
-
-    pub fn glMakeContextCurrent(self: *Window, context: GlContext) void {
-        _ = c.glXMakeCurrent(globals.display, self.window, context.context);
-    }
-
-    pub fn glSwapBuffers(self: *Window) void {
-        c.glXSwapBuffers(globals.display, self.window);
-    }
-
-    pub fn glSwapInterval(self: *Window, interval: i32) void {
-        if (glx.swapIntervalEXT) |swapIntervalEXT| {
-            swapIntervalEXT(globals.display, self.window, interval);
-        }
-    }
-
     pub fn vkCreateSurface(self: Window, instance: usize, allocation_callbacks: ?*const anyopaque, surface: *u64) i32 {
         const VkXlibSurfaceCreateInfoKHR = extern struct {
             sType: i32 = 1000004000,
@@ -767,40 +618,6 @@ pub const Window = struct {
         return c.XCreatePixmapCursor(globals.display, pixmap, pixmap, &color, &color, 0, 0);
     }
 };
-
-pub const Framebuffer = struct {
-    image: *h.XImage,
-    gc: h.GC,
-    pixels: []u32,
-    size: wio.Size,
-
-    pub fn destroy(self: *Framebuffer) void {
-        self.image.data = null;
-        _ = c.XFree(self.image);
-        _ = c.XFreeGC(globals.display, self.gc);
-        internal.allocator.free(self.pixels);
-    }
-
-    pub fn setPixel(self: *Framebuffer, x: usize, y: usize, rgb: u32) void {
-        std.mem.writeInt(u32, std.mem.asBytes(&self.pixels[y * self.size.width + x]), rgb, .little);
-    }
-};
-
-pub const GlContext = struct {
-    context: h.GLXContext,
-
-    pub fn destroy(self: GlContext) void {
-        c.glXDestroyContext(globals.display, self.context);
-    }
-};
-
-pub fn glGetProcAddress(name: [*:0]const u8) ?*const anyopaque {
-    return c.glXGetProcAddress(name);
-}
-
-pub fn glReleaseCurrentContext() void {
-    _ = c.glXMakeCurrent(globals.display, h.None, null);
-}
 
 pub fn getRequiredVulkanInstanceExtensions() []const [*:0]const u8 {
     return &.{ "VK_KHR_surface", "VK_KHR_xlib_surface" };

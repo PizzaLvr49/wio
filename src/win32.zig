@@ -9,12 +9,6 @@ const class_name = w.L("wio");
 
 var helper_window: w.HWND = undefined;
 
-var wgl: struct {
-    swapIntervalEXT: ?*const fn (i32) callconv(.winapi) w.BOOL = null,
-    choosePixelFormatARB: ?*const fn (w.HDC, ?[*]const i32, ?[*]const f32, u32, [*c]i32, *u32) callconv(.winapi) w.BOOL = null,
-    createContextAttribsARB: ?*const fn (w.HDC, w.HGLRC, [*]const i32) callconv(.winapi) w.HGLRC = null,
-} = .{};
-
 var vulkan: w.HMODULE = undefined;
 
 const JoystickInfo = struct {
@@ -25,11 +19,6 @@ var joysticks: std.AutoHashMapUnmanaged(w.HANDLE, JoystickInfo) = undefined;
 var xinput: std.StaticBitSet(4) = .empty;
 var helper_input: []u8 = &.{};
 var joystickConnectedFn: ?*const fn (wio.JoystickDevice) void = null;
-
-var mm_device_enumerator: *w.IMMDeviceEnumerator = undefined;
-var mm_notification_client = MMNotificationClient{};
-var audioDefaultOutputFn: ?*const fn (wio.AudioDevice) void = null;
-var audioDefaultInputFn: ?*const fn (wio.AudioDevice) void = null;
 
 pub fn init(options: wio.InitOptions) !void {
     const instance = w.GetModuleHandleW(null);
@@ -55,40 +44,6 @@ pub fn init(options: wio.InitOptions) !void {
         instance,
         null,
     ) orelse return logLastError("CreateWindowExW");
-
-    if (build_options.opengl) {
-        const dc = w.GetDC(helper_window);
-        defer _ = w.ReleaseDC(helper_window, dc);
-
-        var pfd = std.mem.zeroInit(w.PIXELFORMATDESCRIPTOR, .{
-            .nSize = @sizeOf(w.PIXELFORMATDESCRIPTOR),
-            .nVersion = 1,
-            .dwFlags = w.PFD_DRAW_TO_WINDOW | w.PFD_SUPPORT_OPENGL | w.PFD_DOUBLEBUFFER,
-            .iPixelType = w.PFD_TYPE_RGBA,
-            .cColorBits = 24,
-        });
-        _ = w.SetPixelFormat(dc, w.ChoosePixelFormat(dc, &pfd), &pfd);
-
-        const temp_rc = w.wglCreateContext(dc);
-        defer _ = w.wglDeleteContext(temp_rc);
-        _ = w.wglMakeCurrent(dc, temp_rc);
-
-        if (w.wglGetProcAddress("wglGetExtensionsStringARB")) |proc| {
-            const getExtensionsStringARB: *const fn (w.HDC) callconv(.winapi) ?[*:0]const u8 = @ptrCast(proc);
-            if (getExtensionsStringARB(dc)) |extensions| {
-                var iter = std.mem.tokenizeScalar(u8, std.mem.sliceTo(extensions, 0), ' ');
-                while (iter.next()) |name| {
-                    if (std.mem.eql(u8, name, "WGL_EXT_swap_control")) {
-                        wgl.swapIntervalEXT = @ptrCast(w.wglGetProcAddress("wglSwapIntervalEXT"));
-                    } else if (std.mem.eql(u8, name, "WGL_ARB_pixel_format")) {
-                        wgl.choosePixelFormatARB = @ptrCast(w.wglGetProcAddress("wglChoosePixelFormatARB"));
-                    } else if (std.mem.eql(u8, name, "WGL_ARB_create_context_profile")) {
-                        wgl.createContextAttribsARB = @ptrCast(w.wglGetProcAddress("wglCreateContextAttribsARB"));
-                    }
-                }
-            }
-        }
-    }
 
     if (build_options.vulkan) {
         vulkan = w.LoadLibraryW(w.L("vulkan-1.dll")) orelse return logLastError("LoadLibraryW");
@@ -119,39 +74,12 @@ pub fn init(options: wio.InitOptions) !void {
         if (w.RegisterRawInputDevices(&devices, devices.len, @sizeOf(w.RAWINPUTDEVICE)) == w.FALSE) return logLastError("RegisterRawInputDevices");
     }
 
-    if (build_options.drop or build_options.audio) {
+    if (build_options.drop) {
         try SUCCEED(w.OleInitialize(null), "OleInitialize");
-    }
-
-    if (build_options.audio) {
-        audioDefaultOutputFn = options.audioDefaultOutputFn;
-        audioDefaultInputFn = options.audioDefaultInputFn;
-
-        try SUCCEED(w.CoCreateInstance(&w.CLSID_MMDeviceEnumerator, null, w.CLSCTX_ALL, &w.IID_IMMDeviceEnumerator, @ptrCast(&mm_device_enumerator)), "CoCreateInstance");
-
-        var device: *w.IMMDevice = undefined;
-        if (options.audioDefaultOutputFn) |callback| {
-            if (mm_device_enumerator.GetDefaultAudioEndpoint(w.eRender, w.eConsole, @ptrCast(&device)) == w.S_OK) {
-                callback(.{ .backend = .{ .device = device } });
-            }
-        }
-        if (options.audioDefaultInputFn) |callback| {
-            if (mm_device_enumerator.GetDefaultAudioEndpoint(w.eCapture, w.eConsole, @ptrCast(&device)) == w.S_OK) {
-                callback(.{ .backend = .{ .device = device } });
-            }
-        }
-
-        if (options.audioDefaultOutputFn != null or options.audioDefaultInputFn != null) {
-            try SUCCEED(mm_device_enumerator.RegisterEndpointNotificationCallback(&mm_notification_client.interface), "RegisterEndpointNotificationCallback");
-        }
     }
 }
 
 pub fn deinit() void {
-    if (build_options.audio) {
-        _ = mm_device_enumerator.Release();
-    }
-
     if (build_options.joystick) {
         internal.allocator.free(helper_input);
 
@@ -164,7 +92,7 @@ pub fn deinit() void {
         _ = w.FreeLibrary(vulkan);
     }
 
-    if (build_options.drop or build_options.audio) {
+    if (build_options.drop) {
         w.OleUninitialize();
     }
 
@@ -185,24 +113,6 @@ pub fn update() void {
     while (w.PeekMessageW(&msg, null, 0, 0, w.PM_REMOVE) != 0) {
         _ = w.TranslateMessage(&msg);
         _ = w.DispatchMessageW(&msg);
-    }
-
-    if (build_options.audio) {
-        var maybe_device: ?*w.IMMDevice = undefined;
-        if (audioDefaultOutputFn) |callback| {
-            mm_notification_client.mutex.lockUncancelable(internal.io);
-            maybe_device = mm_notification_client.default_output;
-            mm_notification_client.default_output = null;
-            mm_notification_client.mutex.unlock(internal.io);
-            if (maybe_device) |device| callback(.{ .backend = .{ .device = device } });
-        }
-        if (audioDefaultInputFn) |callback| {
-            mm_notification_client.mutex.lockUncancelable(internal.io);
-            maybe_device = mm_notification_client.default_input;
-            mm_notification_client.default_input = null;
-            mm_notification_client.mutex.unlock(internal.io);
-            if (maybe_device) |device| callback(.{ .backend = .{ .device = device } });
-        }
     }
 }
 
@@ -286,9 +196,6 @@ pub const Window = struct {
         files: std.ArrayList([]const u8) = .empty,
         text: ?[]const u8 = null,
     } else struct {} = .{},
-    opengl: if (build_options.opengl) struct {
-        dc: w.HDC = null,
-    } else struct {} = .{},
 
     pub fn create(options: wio.CreateWindowOptions) !*Window {
         const title = try std.unicode.utf8ToUtf16LeAllocZ(internal.allocator, options.title);
@@ -335,59 +242,11 @@ pub const Window = struct {
             _ = w.RegisterDragDrop(window, &self.drop.target.interface);
         }
 
-        if (build_options.opengl) {
-            if (options.gl_options) |gl| {
-                self.opengl.dc = w.GetDC(self.window);
-
-                var format: i32 = undefined;
-                var pfd: w.PIXELFORMATDESCRIPTOR = undefined;
-                var valid_pfd = false;
-                if (wgl.choosePixelFormatARB) |choosePixelFormatARB| {
-                    var count: u32 = undefined;
-                    if (choosePixelFormatARB(self.opengl.dc, &.{
-                        0x2011, if (gl.doublebuffer) w.TRUE else w.FALSE,
-                        0x2015, gl.red_bits,
-                        0x2017, gl.green_bits,
-                        0x2019, gl.blue_bits,
-                        0x201B, gl.alpha_bits,
-                        0x2022, gl.depth_bits,
-                        0x2023, gl.stencil_bits,
-                        0x2041, if (gl.samples != 0) 1 else 0,
-                        0x2042, gl.samples,
-                        0,
-                    }, null, 1, &format, &count) == w.FALSE) return logLastError("wglChoosePixelFormatARB");
-                    if (count == 1) {
-                        if (w.DescribePixelFormat(self.opengl.dc, format, @sizeOf(w.PIXELFORMATDESCRIPTOR), &pfd) != 0) {
-                            valid_pfd = true;
-                        }
-                    }
-                }
-                if (!valid_pfd) {
-                    pfd = std.mem.zeroInit(w.PIXELFORMATDESCRIPTOR, .{
-                        .nSize = @sizeOf(w.PIXELFORMATDESCRIPTOR),
-                        .nVersion = 1,
-                        .dwFlags = w.PFD_DRAW_TO_WINDOW | w.PFD_SUPPORT_OPENGL | if (gl.doublebuffer) w.PFD_DOUBLEBUFFER else 0,
-                        .iPixelType = w.PFD_TYPE_RGBA,
-                        .cColorBits = gl.red_bits + gl.green_bits + gl.blue_bits,
-                        .cAlphaBits = gl.alpha_bits,
-                        .cDepthBits = gl.depth_bits,
-                        .cStencilBits = gl.stencil_bits,
-                    });
-                    format = w.ChoosePixelFormat(self.opengl.dc, &pfd);
-                    if (format == 0) return logLastError("ChoosePixelFormat");
-                }
-                _ = w.SetPixelFormat(self.opengl.dc, format, &pfd);
-            }
-        }
-
         return self;
     }
 
     pub fn destroy(self: *Window) void {
         self.disableDrawAvailableEvents();
-        if (build_options.opengl) {
-            _ = w.ReleaseDC(self.window, self.opengl.dc);
-        }
         if (build_options.drop) {
             _ = w.RevokeDragDrop(self.window);
             for (self.drop.files.items) |f| internal.allocator.free(f);
@@ -556,77 +415,6 @@ pub const Window = struct {
         return wio.DropData.dupe(allocator, self.drop.files.items, self.drop.text) catch .{ .files = &.{}, .text = null };
     }
 
-    pub fn createFramebuffer(_: *Window, size: wio.Size) !Framebuffer {
-        if (size.width == 0 or size.height == 0) return .{ .dc = null, .bitmap = null, .pixels = &.{}, .size = size };
-
-        const dc = w.CreateCompatibleDC(null) orelse return logLastError("CreateCompatibleDC");
-        errdefer _ = w.DeleteDC(dc);
-
-        var info = std.mem.zeroes(w.BITMAPINFO);
-        info.bmiHeader.biSize = @sizeOf(w.BITMAPINFOHEADER);
-        info.bmiHeader.biWidth = size.width;
-        info.bmiHeader.biHeight = -@as(i32, size.height);
-        info.bmiHeader.biPlanes = 1;
-        info.bmiHeader.biBitCount = 32;
-        info.bmiHeader.biCompression = w.BI_RGB;
-
-        var bits: ?*anyopaque = null;
-        const bitmap = w.CreateDIBSection(dc, &info, w.DIB_RGB_COLORS, &bits, null, 0) orelse return logLastError("CreateDIBSection");
-        errdefer _ = w.DeleteObject(bitmap);
-        _ = w.SelectObject(dc, bitmap);
-
-        const pixel_count = @as(usize, size.width) * @as(usize, size.height);
-        const pixels: [*]u32 = @ptrCast(@alignCast(bits.?));
-
-        return .{
-            .dc = dc,
-            .bitmap = bitmap,
-            .pixels = pixels[0..pixel_count],
-            .size = size,
-        };
-    }
-
-    pub fn presentFramebuffer(self: *Window, framebuffer: *Framebuffer) void {
-        const dc = w.GetDC(self.window);
-        defer _ = w.ReleaseDC(self.window, dc);
-        _ = w.BitBlt(dc, 0, 0, framebuffer.size.width, framebuffer.size.height, framebuffer.dc, 0, 0, w.SRCCOPY);
-    }
-
-    pub fn glCreateContext(self: *Window, options: wio.GlCreateContextOptions) !GlContext {
-        return .{
-            .rc = if (wgl.createContextAttribsARB) |createContextAttribsARB|
-                createContextAttribsARB(
-                    self.opengl.dc,
-                    if (options.share) |share| share.backend.rc else null,
-                    &[_]i32{
-                        0x2091, options.options.major_version,
-                        0x2092, options.options.minor_version,
-                        0x2094, @as(i32, if (options.options.debug) 1 else 0) | @as(i32, if (options.options.forward_compatible) 2 else 0),
-                        0x9126, if (options.options.profile == .core) 1 else 2,
-                        0,
-                    },
-                ) orelse return logLastError("wglCreateContextAttribsARB")
-            else if (options.share == null)
-                w.wglCreateContext(self.opengl.dc) orelse return logLastError("wglCreateContext")
-            else
-                return error.UnsupportedContextOptions,
-        };
-    }
-
-    pub fn glMakeContextCurrent(self: *Window, context: GlContext) void {
-        _ = w.wglMakeCurrent(self.opengl.dc, context.rc);
-    }
-
-    pub fn glSwapBuffers(self: *Window) void {
-        _ = w.SwapBuffers(self.opengl.dc);
-    }
-
-    pub fn glSwapInterval(_: Window, interval: i32) void {
-        if (wgl.swapIntervalEXT) |swapIntervalEXT| {
-            _ = swapIntervalEXT(interval);
-        }
-    }
-
     pub fn vkCreateSurface(self: Window, instance: usize, allocation_callbacks: ?*const anyopaque, surface: *u64) i32 {
         const VkWin32SurfaceCreateInfoKHR = extern struct {
             sType: i32 = 1000009000,
@@ -675,38 +463,6 @@ pub const Window = struct {
         _ = w.ClipCursor(&rect);
     }
 };
-
-pub const Framebuffer = struct {
-    dc: w.HDC,
-    bitmap: w.HBITMAP,
-    pixels: []u32,
-    size: wio.Size,
-
-    pub fn destroy(self: *Framebuffer) void {
-        _ = w.DeleteObject(self.bitmap);
-        _ = w.DeleteDC(self.dc);
-    }
-
-    pub fn setPixel(self: *Framebuffer, x: usize, y: usize, rgb: u32) void {
-        std.mem.writeInt(u32, std.mem.asBytes(&self.pixels[y * self.size.width + x]), rgb, .little);
-    }
-};
-
-pub const GlContext = struct {
-    rc: w.HGLRC,
-
-    pub fn destroy(self: GlContext) void {
-        _ = w.wglDeleteContext(self.rc);
-    }
-};
-
-pub fn glGetProcAddress(name: [*:0]const u8) ?*const anyopaque {
-    return w.wglGetProcAddress(name) orelse w.GetProcAddress(w.GetModuleHandleW(w.L("opengl32.dll")), name);
-}
-
-pub fn glReleaseCurrentContext() void {
-    _ = w.wglMakeCurrent(null, null);
-}
 
 pub var vkGetInstanceProcAddr: *const fn (usize, [*:0]const u8) callconv(.winapi) ?*const fn () void = undefined;
 
@@ -985,258 +741,6 @@ const XInputJoystick = struct {
         }
 
         return .{ .axes = &self.axes, .hats = &self.hats, .buttons = &self.buttons };
-    }
-};
-
-pub const AudioDeviceIterator = struct {
-    devices: ?*w.IMMDeviceCollection = null,
-    count: u32 = 0,
-    index: u32 = 0,
-
-    pub fn init(mode: wio.AudioDeviceType) AudioDeviceIterator {
-        var result = AudioDeviceIterator{};
-        if (SUCCEED(mm_device_enumerator.EnumAudioEndpoints(if (mode == .output) w.eRender else w.eCapture, w.DEVICE_STATE_ACTIVE, @ptrCast(&result.devices)), "EnumAudioEndpoints")) {
-            SUCCEED(result.devices.?.GetCount(&result.count), "IMMDeviceCollection::GetCount") catch {};
-        } else |_| {}
-        return result;
-    }
-
-    pub fn deinit(self: *AudioDeviceIterator) void {
-        if (self.devices) |devices| _ = devices.Release();
-    }
-
-    pub fn next(self: *AudioDeviceIterator) ?AudioDevice {
-        if (self.index == self.count) return null;
-        var device: *w.IMMDevice = undefined;
-        SUCCEED(self.devices.?.Item(self.index, @ptrCast(&device)), "IMMDeviceCollection::Item") catch return null;
-        self.index += 1;
-        return .{ .device = device };
-    }
-};
-
-pub const AudioDevice = struct {
-    device: *w.IMMDevice,
-
-    pub fn release(self: AudioDevice) void {
-        _ = self.device.Release();
-    }
-
-    pub fn openOutput(self: AudioDevice, writeFn: *const fn ([]f32) void, format: wio.AudioFormat) !*AudioOutput {
-        return self.openAudioClient(format, &w.IID_IAudioRenderClient, @ptrCast(writeFn), AudioClient.outputThread);
-    }
-
-    pub fn openInput(self: AudioDevice, readFn: *const fn ([]const f32) void, format: wio.AudioFormat) !*AudioInput {
-        return self.openAudioClient(format, &w.IID_IAudioCaptureClient, @ptrCast(readFn), AudioClient.inputThread);
-    }
-
-    fn openAudioClient(self: AudioDevice, format: wio.AudioFormat, guid: *const w.GUID, dataFn: *const fn () void, threadFn: fn (*AudioClient) void) !*AudioClient {
-        // device change notification does not guarantee it is configured, so make multiple attempts in case of AUDCLNT_E_DEVICE_INVALIDATED
-        var attempt: u8 = 1;
-        const max_attempts = 2;
-        while (true) {
-            if (self.openAudioClientInner(format, guid, dataFn, threadFn)) |client| {
-                return client;
-            } else |err| {
-                if (attempt < max_attempts) {
-                    attempt += 1;
-                } else {
-                    return err;
-                }
-            }
-        }
-    }
-
-    fn openAudioClientInner(self: AudioDevice, format: wio.AudioFormat, guid: *const w.GUID, dataFn: *const fn () void, threadFn: fn (*AudioClient) void) !*AudioClient {
-        var client: *w.IAudioClient = undefined;
-        try SUCCEED(self.device.Activate(&w.IID_IAudioClient, w.CLSCTX_ALL, null, @ptrCast(&client)), "IMMDevice::Activate");
-        errdefer _ = client.Release();
-
-        const block_align = format.channels * @sizeOf(f32);
-        const waveformat = w.WAVEFORMATEX{
-            .wFormatTag = w.WAVE_FORMAT_IEEE_FLOAT,
-            .nChannels = format.channels,
-            .nSamplesPerSec = format.sample_rate,
-            .nAvgBytesPerSec = format.sample_rate * block_align,
-            .nBlockAlign = block_align,
-            .wBitsPerSample = @bitSizeOf(f32),
-            .cbSize = 0,
-        };
-        try SUCCEED(client.Initialize(w.AUDCLNT_SHAREMODE_SHARED, w.AUDCLNT_STREAMFLAGS_EVENTCALLBACK | w.AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | w.AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY, 0, 0, &waveformat, null), "IAudioClient::Initialize");
-
-        const event = w.CreateEventW(null, w.FALSE, w.FALSE, null) orelse return logLastError("CreateEventW");
-        errdefer std.os.windows.CloseHandle(event);
-        try SUCCEED(client.SetEventHandle(event), "IAudioClient::SetEventHandle");
-
-        var service: *w.IUnknown = undefined;
-        try SUCCEED(client.GetService(guid, @ptrCast(&service)), "IAudioClient::GetService");
-        errdefer _ = service.Release();
-
-        try SUCCEED(client.Start(), "IAudioClient::Start");
-
-        const result = try internal.allocator.create(AudioClient);
-        errdefer internal.allocator.destroy(result);
-        result.* = .{
-            .thread = undefined,
-            .client = client,
-            .event = event,
-            .channels = format.channels,
-            .service = service,
-            .dataFn = dataFn,
-        };
-        result.thread = try std.Thread.spawn(.{}, threadFn, .{result});
-        return result;
-    }
-
-    pub fn getId(self: AudioDevice, allocator: std.mem.Allocator) ![]u8 {
-        var id: [*:0]u16 = undefined;
-        try SUCCEED(self.device.GetId(@ptrCast(&id)), "IMMDevice::GetID");
-        defer w.CoTaskMemFree(id);
-        return std.unicode.utf16LeToUtf8Alloc(allocator, std.mem.sliceTo(id, 0));
-    }
-
-    pub fn getName(self: AudioDevice, allocator: std.mem.Allocator) ![]u8 {
-        var properties: *w.IPropertyStore = undefined;
-        try SUCCEED(self.device.OpenPropertyStore(w.STGM_READ, @ptrCast(&properties)), "IMMDevice::OpenPropertyStore");
-        defer _ = properties.Release();
-
-        var variant: w.PROPVARIANT = undefined;
-        try SUCCEED(properties.GetValue(&w.PKEY_Device_FriendlyName, &variant), "IPropertyStore::GetValue");
-        defer _ = w.PropVariantClear(&variant);
-
-        return if (variant.Anonymous.Anonymous.vt == w.VT_LPWSTR)
-            std.unicode.utf16LeToUtf8Alloc(allocator, std.mem.sliceTo(variant.Anonymous.Anonymous.Anonymous.pwszVal, 0))
-        else
-            "";
-    }
-};
-
-const AudioClient = struct {
-    thread: std.Thread,
-    client: *w.IAudioClient,
-    service: *w.IUnknown,
-    dataFn: *const fn () void,
-    event: w.HANDLE,
-    channels: u16,
-    stop: std.atomic.Value(bool) = .init(false),
-
-    pub fn close(self: *AudioOutput) void {
-        self.stop.store(true, .unordered);
-        self.thread.join();
-
-        std.os.windows.CloseHandle(self.event.?);
-        _ = self.service.Release();
-        _ = self.client.Release();
-        internal.allocator.destroy(self);
-    }
-
-    fn outputThread(self: *AudioClient) void {
-        const render_client: *w.IAudioRenderClient = @ptrCast(self.service);
-        const writeFn: *const fn ([]f32) void = @ptrCast(self.dataFn);
-
-        var size: u32 = undefined;
-        SUCCEED(self.client.GetBufferSize(&size), "IAudioClient::GetBufferSize") catch return;
-
-        while (!self.stop.load(.unordered)) {
-            _ = w.WaitForSingleObject(self.event, w.INFINITE);
-
-            var used: u32 = undefined;
-            SUCCEED(self.client.GetCurrentPadding(&used), "IAudioClient::GetCurrentPadding") catch break;
-            const available = size - used;
-
-            var buffer: [*]f32 = undefined;
-            SUCCEED(render_client.GetBuffer(available, @ptrCast(&buffer)), "IAudioRenderClient::GetBuffer") catch break;
-            writeFn(buffer[0 .. available * self.channels]);
-            SUCCEED(render_client.ReleaseBuffer(available, 0), "IAudioRenderClient::ReleaseBuffer") catch break;
-        }
-    }
-
-    fn inputThread(self: *AudioClient) void {
-        const capture_client: *w.IAudioCaptureClient = @ptrCast(self.service);
-        const readFn: *const fn ([]const f32) void = @ptrCast(self.dataFn);
-
-        while (!self.stop.load(.unordered)) {
-            _ = w.WaitForSingleObject(self.event, w.INFINITE);
-
-            var count: u32 = undefined;
-            SUCCEED(self.client.GetCurrentPadding(&count), "IAudioClient::GetCurrentPadding") catch break;
-
-            var buffer: [*]f32 = undefined;
-            var flags: u32 = undefined;
-            SUCCEED(capture_client.GetBuffer(@ptrCast(&buffer), &count, &flags, null, null), "IAudioCaptureClient::GetBuffer") catch break;
-            readFn(buffer[0 .. count * self.channels]);
-            SUCCEED(capture_client.ReleaseBuffer(count), "IAudioCaptureClient::ReleaseBuffer") catch break;
-        }
-    }
-};
-
-pub const AudioOutput = AudioClient;
-pub const AudioInput = AudioClient;
-
-const MMNotificationClient = struct {
-    interface: w.IMMNotificationClient = .{ .lpVtbl = &.{
-        .QueryInterface = QueryInterface,
-        .AddRef = AddRef,
-        .Release = Release,
-        .OnDeviceStateChanged = OnDeviceStateChanged,
-        .OnDeviceAdded = OnDeviceAdded,
-        .OnDeviceRemoved = OnDeviceRemoved,
-        .OnDefaultDeviceChanged = OnDefaultDeviceChanged,
-        .OnPropertyValueChanged = OnPropertyValueChanged,
-    } },
-    mutex: std.Io.Mutex = .init,
-    default_output: ?*w.IMMDevice = null,
-    default_input: ?*w.IMMDevice = null,
-
-    fn QueryInterface(_: *w.IMMNotificationClient, _: [*c]const w.GUID, _: [*c]?*anyopaque) callconv(.winapi) w.HRESULT {
-        return w.E_NOINTERFACE;
-    }
-
-    fn AddRef(_: *w.IMMNotificationClient) callconv(.winapi) u32 {
-        return 1;
-    }
-
-    fn Release(_: *w.IMMNotificationClient) callconv(.winapi) u32 {
-        return 1;
-    }
-
-    fn OnDeviceStateChanged(_: *w.IMMNotificationClient, _: [*c]const u16, _: u32) callconv(.winapi) w.HRESULT {
-        return w.S_OK;
-    }
-
-    fn OnDeviceAdded(_: *w.IMMNotificationClient, _: [*c]const u16) callconv(.winapi) w.HRESULT {
-        return w.S_OK;
-    }
-
-    fn OnDeviceRemoved(_: *w.IMMNotificationClient, _: [*c]const u16) callconv(.winapi) w.HRESULT {
-        return w.S_OK;
-    }
-
-    fn OnDefaultDeviceChanged(_: *w.IMMNotificationClient, flow: i32, role: i32, id: [*c]const u16) callconv(.winapi) w.HRESULT {
-        if (role == w.eConsole) {
-            const maybe_device = if (flow == w.eRender and audioDefaultOutputFn != null)
-                &mm_notification_client.default_output
-            else if (flow == w.eCapture and audioDefaultInputFn != null)
-                &mm_notification_client.default_input
-            else
-                null;
-
-            if (maybe_device) |device| {
-                mm_notification_client.mutex.lockUncancelable(internal.io);
-                if (device.*) |old| {
-                    _ = old.Release();
-                    device.* = null;
-                }
-                if (id) |_| {
-                    SUCCEED(mm_device_enumerator.GetDevice(id, @ptrCast(device)), "IMMDeviceEnumerator::GetDevice") catch {};
-                }
-                mm_notification_client.mutex.unlock(internal.io);
-            }
-        }
-        return w.S_OK;
-    }
-
-    fn OnPropertyValueChanged(_: *w.IMMNotificationClient, _: [*c]const u16, _: w.PROPERTYKEY) callconv(.winapi) w.HRESULT {
-        return w.S_OK;
     }
 };
 
