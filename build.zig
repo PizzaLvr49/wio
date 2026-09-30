@@ -72,7 +72,6 @@ pub fn build(b: *std.Build) !void {
                     \\#include <X11/XKBlib.h>
                     \\#include <X11/extensions/Xrandr.h>
                     \\#include <X11/Xcursor/Xcursor.h>
-                    \\#include <GL/glx.h>
                     \\
                 );
             }
@@ -118,8 +117,6 @@ pub fn build(b: *std.Build) !void {
                     \\#include <xkbcommon/xkbcommon.h>
                     \\#include <xkbcommon/xkbcommon-compose.h>
                     \\#include <libdecor.h>
-                    \\#include <wayland-egl.h>
-                    \\#include <EGL/egl.h>
                     \\
                 );
             }
